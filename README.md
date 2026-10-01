@@ -15,6 +15,32 @@ csc-project/
 
 ---
 
+## Screenshots
+
+**Member panel**: vaporwave style, built mobile-first for scanning at events.
+
+<p align="center">
+  <img src="docs/screenshots/member-dashboard.png" alt="Member dashboard with CSC Credits balance" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/member-history-mobile.png" alt="Credit history on a phone" width="32%">
+  &nbsp;
+  <img src="docs/screenshots/member-store-mobile.png" alt="CSC Store on a phone" width="32%">
+</p>
+
+**Admin panel**: clean faded-purple dashboard. Each QR campaign gets a random token, and each member can redeem it once.
+
+<p align="center">
+  <img src="docs/screenshots/admin-qr.png" alt="Admin QR campaign with generated QR code and redemptions" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/member-login.png" alt="Login page" width="70%">
+</p>
+
+---
+
 ## 1. Getting started
 
 ### Requirements
