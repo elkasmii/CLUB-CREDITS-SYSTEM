@@ -1,0 +1,198 @@
+// CSC Credits database schema (MySQL)
+//
+// Design notes
+// - One `users` table holds both admins and members (the `role` column decides).
+//   Member-only fields (studentId, program, ...) are nullable. A separate
+//   `members`/`roles` table would add joins without adding information.
+// - `credit_transactions` is the source of truth for credits. `users.creditBalance`
+//   is a cached running total that is ONLY changed inside the same DB transaction
+//   that inserts a credit_transactions row (see services/credit.service.ts).
+// - `qr_redemptions` has a UNIQUE (memberId, campaignId) constraint: the database
+//   itself guarantees a member can redeem a given QR code only once.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  REJECTED
+  DISABLED
+}
+
+// Credits flow for the store:
+//   reserve         -> STORE_RESERVATION (negative, credits are held/spent immediately)
+//   reject / cancel -> STORE_REFUND      (positive, credits returned)
+// STORE_REDEMPTION is kept for direct "spend at the stand" purchases an admin may record.
+enum CreditType {
+  QR_REWARD
+  ADMIN_GRANT
+  ADJUSTMENT
+  STORE_RESERVATION
+  STORE_REDEMPTION
+  STORE_REFUND
+}
+
+enum ReservationStatus {
+  PENDING
+  APPROVED
+  FULFILLED
+  REJECTED
+  CANCELLED
+}
+
+model User {
+  id            Int        @id @default(autoincrement())
+  fullName      String     @db.VarChar(120)
+  email         String     @unique @db.VarChar(191)
+  passwordHash  String     @db.VarChar(255)
+  role          Role       @default(MEMBER)
+  status        UserStatus @default(PENDING)
+  studentId     String?    @unique @db.VarChar(50)
+  program       String?    @db.VarChar(120)
+  yearOfStudy   Int?
+  phone         String?    @db.VarChar(30)
+  creditBalance Int        @default(0)
+  approvedAt    DateTime?
+  // Tokens issued before this moment are rejected (logs out other sessions after a password change).
+  passwordChangedAt DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  passwordResetTokens  PasswordResetToken[]
+  transactions         CreditTransaction[] @relation("MemberTransactions")
+  grantedTransactions  CreditTransaction[] @relation("GrantedBy")
+  redemptions          QrRedemption[]
+  reservations         Reservation[]
+  createdQrCampaigns   QrCampaign[]
+
+  @@index([role, status])
+  @@map("users")
+}
+
+// "Forgot password" links. Only a SHA-256 hash of the token is stored, so a database
+// leak can't be used to reset passwords. Tokens expire after 1 hour and work once.
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+model QrCampaign {
+  id          Int       @id @default(autoincrement())
+  title       String    @db.VarChar(150)
+  description String?   @db.Text
+  credits     Int
+  // 256-bit random value, base64url encoded (43 chars). Never derived from the credits.
+  token       String    @unique @db.VarChar(64)
+  isActive    Boolean   @default(true)
+  expiresAt   DateTime?
+  createdById Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  createdBy   User           @relation(fields: [createdById], references: [id])
+  redemptions QrRedemption[]
+
+  @@index([createdById])
+  @@map("qr_campaigns")
+}
+
+model QrRedemption {
+  id            Int      @id @default(autoincrement())
+  memberId      Int
+  campaignId    Int
+  transactionId Int      @unique
+  redeemedAt    DateTime @default(now())
+
+  member      User              @relation(fields: [memberId], references: [id])
+  campaign    QrCampaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  transaction CreditTransaction @relation(fields: [transactionId], references: [id])
+
+  // THE one-time-per-member rule, enforced by the database.
+  @@unique([memberId, campaignId])
+  @@index([campaignId])
+  @@map("qr_redemptions")
+}
+
+model CreditTransaction {
+  id            Int        @id @default(autoincrement())
+  memberId      Int
+  // Positive = earned, negative = spent / held.
+  amount        Int
+  type          CreditType
+  description   String     @db.VarChar(255)
+  // Member balance right after this transaction (handy for audits).
+  balanceAfter  Int
+  // Admin who performed the action (manual grants, adjustments, reservation updates).
+  createdById   Int?
+  reservationId Int?
+  createdAt     DateTime   @default(now())
+
+  member       User          @relation("MemberTransactions", fields: [memberId], references: [id])
+  createdBy    User?         @relation("GrantedBy", fields: [createdById], references: [id])
+  reservation  Reservation?  @relation(fields: [reservationId], references: [id])
+  qrRedemption QrRedemption?
+
+  @@index([memberId, createdAt])
+  @@index([type])
+  @@index([reservationId])
+  @@map("credit_transactions")
+}
+
+model StoreItem {
+  id             Int      @id @default(autoincrement())
+  name           String   @db.VarChar(120)
+  description    String?  @db.Text
+  imageUrl       String?  @db.VarChar(255)
+  priceInCredits Int
+  stock          Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  reservations Reservation[]
+
+  @@index([isActive])
+  @@map("store_items")
+}
+
+model Reservation {
+  id                 Int               @id @default(autoincrement())
+  memberId           Int
+  itemId             Int
+  // Price is copied at reservation time so later price edits don't change history.
+  priceAtReservation Int
+  status             ReservationStatus @default(PENDING)
+  adminNote          String?           @db.VarChar(255)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  member       User                @relation(fields: [memberId], references: [id])
+  item         StoreItem           @relation(fields: [itemId], references: [id])
+  transactions CreditTransaction[]
+
+  @@index([memberId])
+  @@index([itemId])
+  @@index([status])
+  @@map("reservations")
+}
